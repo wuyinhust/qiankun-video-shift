@@ -1,0 +1,4 @@
+interface:
+  display_name: "乾坤大挪移"
+  short_description: "自动拆解对标视频，提炼爆款公式并还原通用与 H3 提示词"
+  default_prompt: "使用 $qiankun-video-shift 拆解这条对标视频，提炼爆款公式并输出通用与 MiniMax H3 提示词。"
