@@ -93,7 +93,8 @@ def probe_video(ffprobe: str, video: Path) -> dict:
 
 
 def detect_scene_times(ffmpeg: str, video: Path, duration: float, threshold: float) -> list[float]:
-    expression = f"setpts=PTS-STARTPTS,select='gt(scene,{threshold:.4f})',showinfo"
+    # RGB includes color changes that luma-only scoring can miss (blue to black).
+    expression = f"setpts=PTS-STARTPTS,format=rgb24,select='gt(scene,{threshold:.4f})',showinfo"
     result = run(
         [
             ffmpeg,
@@ -192,22 +193,6 @@ def frame_positions(
                 keep.append(item)
         unique = sorted(keep, key=lambda item: item[1])
     return unique
-
-
-def extract_frame(ffmpeg: str, video: Path, timestamp: float, destination: Path, force: bool) -> None:
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel", "error",
-        "-nostdin",
-        "-i", str(video),
-        "-ss", f"{timestamp:.3f}",
-        "-frames:v", "1",
-        "-q:v", "2",
-    ]
-    command.append("-y" if force else "-n")
-    command.append(str(destination))
-    run(command, f"抽帧 {timestamp:.3f}s")
 
 
 def extract_clip(
@@ -374,6 +359,7 @@ def main() -> int:
             )
         source_hash = sha256_file(video)
         settings = {k: getattr(args, k) for k in ["scene_threshold", "min_shot_seconds", "max_seconds", "max_shots", "max_frames_per_shot", "extra_frame_interval", "extract_clips", "no_audio"]}
+        settings["scene_metric"] = "rgb24"
         cached_path = args.output_dir / "shot_manifest.json"
         if args.reuse and cached_path.is_file() and not args.force:
             cached = json.loads(cached_path.read_text())

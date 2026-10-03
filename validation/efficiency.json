@@ -1,0 +1,41 @@
+{
+  "measurement": "One local synthetic eight-second three-shot video. Wall clock, not a general speed claim. Reading budgets are Unicode characters, not measured model tokens. H3 official guide excluded from both sides. Cold runs use scene-threshold 0.05 and no-audio on both implementations.",
+  "baseline_head": "cacb13d60022324f353e1cb0fd8699ed2c32c596",
+  "read_budgets": {
+    "old_required_chars": 15973,
+    "old_entry_chars": 4015,
+    "new_entry_chars": 2321,
+    "new_route_chars": {
+      "prompt": 7429,
+      "remix": 10502,
+      "revision_existing_system": 3714
+    },
+    "revision_scope": "Existing reviewed project: SKILL + production reference if the affected system needs it. Existing source facts and the saved analysis are inspected locally. No repeat contract read."
+  },
+  "media": {
+    "old_cold_seconds": 0.8336,
+    "new_cold_seconds": 0.6373,
+    "new_reuse_seconds": 0.1691,
+    "equal_shot_ranges": true,
+    "equal_representative_rgb": true,
+    "reuse_manifest_bytes_unchanged": true,
+    "shots": 3,
+    "representative_rgb": [
+      [
+        254,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        255
+      ],
+      [
+        0,
+        0,
+        0
+      ]
+    ]
+  }
+}

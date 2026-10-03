@@ -10,6 +10,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from media_tools import resolve_binary
+from analysis_contract import compile_analysis, validate_v2, file_hash
+from test_contract import fixture
 
 
 class MediaTests(unittest.TestCase):
@@ -24,7 +26,7 @@ class MediaTests(unittest.TestCase):
         cls.video = cls.work / "synthetic.mp4"
         subprocess.run([cls.ffmpeg, "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=red:s=160x120:r=25:d=2", "-f", "lavfi", "-i", "color=blue:s=160x120:r=10:d=2", "-f", "lavfi", "-i", "color=black:s=160x120:r=25:d=0.4", "-f", "lavfi", "-i", "sine=frequency=440:duration=4.4", "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]", "-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-c:a", "aac", "-fps_mode", "vfr", str(cls.video)], check=True, capture_output=True)
         t = time.perf_counter()
-        cls.run_script("segment_video.py", str(cls.video), "--output-dir", str(cls.work / "deconstruction"), "--scene-threshold", "0.05", "--no-audio")
+        cls.run_script("segment_video.py", str(cls.video), "--output-dir", str(cls.work / "deconstruction"), "--no-audio")
         cls.cold_s = time.perf_counter() - t
         cls.manifest = json.loads((cls.work / "deconstruction" / "shot_manifest.json").read_text())
 
@@ -58,7 +60,7 @@ class MediaTests(unittest.TestCase):
         path = self.work / "deconstruction" / "shot_manifest.json"
         before = path.read_bytes()
         t = time.perf_counter()
-        self.run_script("segment_video.py", str(self.video), "--output-dir", str(path.parent), "--scene-threshold", "0.05", "--no-audio", "--reuse")
+        self.run_script("segment_video.py", str(self.video), "--output-dir", str(path.parent), "--no-audio", "--reuse")
         warm = time.perf_counter() - t
         self.assertEqual(before, path.read_bytes())
         self.assertLess(warm, self.cold_s)
@@ -66,6 +68,10 @@ class MediaTests(unittest.TestCase):
     def test_changed_settings_not_reused(self):
         result = self.run_script("segment_video.py", str(self.video), "--output-dir", str(self.work / "deconstruction"), "--scene-threshold", "0.7", "--no-audio", "--reuse", success=False)
         self.assertEqual(4, result.returncode)
+
+    def test_default_rgb_detector_keeps_dark_color_cut(self):
+        self.assertEqual([2.0, 4.0], self.manifest["scene_detection"]["detected_cut_times_s"])
+        self.assertEqual(3, self.manifest["shot_count"])
 
     def test_seed_no_invented_observations(self):
         target = self.work / "analysis.json"
@@ -88,6 +94,18 @@ class MediaTests(unittest.TestCase):
     def test_audio_metadata(self):
         self.assertTrue(self.manifest["audio_streams"])
         self.assertIsInstance(self.manifest["audio_streams"][0]["start_pts_s"], float)
+
+    def test_audio_copy_verifies_actual_stream(self):
+        root = self.work / "audio-check"
+        root.mkdir()
+        d = fixture(root)
+        d["source"].update(video_path=str(self.video), sha256=file_hash(self.video), duration_s=4.4)
+        d["evidence"][0]["source_sha256"] = d["source"]["sha256"]
+        stream = self.manifest["audio_streams"][0]
+        d["audio_plan"] = {"method": "postproduction_copy", "content_status": "unavailable", "authorized_reuse": True, "stream_index": stream["index"], "start_pts_s": stream["start_pts_s"]}
+        self.assertEqual([], validate_v2(compile_analysis(d), root, True))
+        d["audio_plan"]["stream_index"] = 99
+        self.assertTrue(validate_v2(compile_analysis(d), root, True))
 
 
 if __name__ == "__main__":

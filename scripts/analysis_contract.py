@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
+import subprocess
 
 VERSION = "2.0"
 MODES = {"generic", "T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA"}
@@ -187,7 +189,9 @@ def validate_inputs(data):
             for i in ids:
                 f = facts[i]
                 fr = f.get("range_s")
-                if f.get("kind") not in {"identity", "initial", "state", "ending"} or not inside(fr, r) or not span(fr) or min(abs(v - boundary) for v in fr) > 0.12:
+                terminal = source.get("last_frame_time_s") if key.startswith("closing") and span(scope) and abs(r[1] - scope[1]) < 0.001 else None
+                nearby = span(fr) and (min(abs(v - boundary) for v in fr) <= 0.12 or (number(terminal) and any(abs(v - terminal) <= 0.001 for v in fr)))
+                if f.get("kind") not in {"identity", "initial", "state", "ending"} or not inside(fr, r) or not nearby:
                     errors.append(f"{jid}: {key} not bound to current boundary")
         crossed = [s for s in shots.values() if span(s.get("range_s")) and s["range_s"][0] < r[1] and s["range_s"][1] > r[0]]
         if mode in {"I2VA", "FL2VA", "L2VA"} and len(crossed) != 1:
@@ -207,7 +211,7 @@ def validate_inputs(data):
         for ref in refs:
             label = ref.get("label", "")
             labels.append(label)
-            if not isinstance(label, str) or not label.startswith(("<Picture ", "<Video ", "<Audio ", "<Subject ")) or not label.endswith(">"):
+            if not isinstance(label, str) or not re.fullmatch(r"<(?:Picture|Video|Audio|Subject) [1-9][0-9]*>", label):
                 errors.append(f"{jid}: invalid reference label")
             if not isinstance(ref.get("path"), str) or not isinstance(ref.get("sha256"), str) or len(ref["sha256"]) != 64:
                 errors.append(f"{jid}: actual reference file/hash required")
@@ -234,7 +238,7 @@ def validate_inputs(data):
     if audio.get("content_status") not in {"verified", "unavailable", "no_track", "not_requested"}:
         errors.append("audio_plan content_status required")
     if audio.get("method") == "postproduction_copy":
-        if data.get("intent") != "faithful" or not audio.get("authorized_reuse") or not number(audio.get("stream_index")) or not number(audio.get("start_pts_s")):
+        if data.get("intent") != "faithful" or audio.get("authorized_reuse") is not True or not isinstance(audio.get("stream_index"), int) or isinstance(audio.get("stream_index"), bool) or audio["stream_index"] < 0 or not number(audio.get("start_pts_s")):
             errors.append("audio copy needs faithful mapping, authorized reuse and stream metadata")
     if audio.get("content_status") != "verified" and any(f.get("status") == "observed" and f.get("kind") in {"dialogue", "soundscape", "music"} for f in facts.values()):
         errors.append("unheard audio cannot become observed sound facts")
@@ -251,6 +255,9 @@ def validate_inputs(data):
             errors.append(f"{sid}: visual system needs role/behavior/event references")
     if data.get("workflow") == "remix" and (not isinstance(data.get("viral_analysis"), dict) or not text(data.get("viral_analysis", {}).get("viral_formula")) or not isinstance(data.get("replacement_map"), list) or not data.get("replacement_map")):
         errors.append("remix needs viral formula and replacement_map")
+    assets = data.get("accepted_assets", [])
+    if not isinstance(assets, list) or any(not isinstance(a, dict) or not isinstance(a.get("path"), str) or not isinstance(a.get("sha256"), str) or len(a["sha256"]) != 64 for a in assets):
+        errors.append("accepted_assets need file paths and hashes")
     return errors
 
 
@@ -278,7 +285,7 @@ def render(data):
                 continue
             n = len(main) + 1
             at = max(0, (shot["range_s"][0] - start) * scale)
-            prefix = f"[Shot {n}] " + (f"At 00:{at:06.3f}, " if n > 1 else "")
+            prefix = f"[Shot {n}] " + (f"At {int(at // 60):02d}:{at % 60:06.3f}, " if n > 1 else "")
             sentences = []
             for f in sorted(fs, key=lambda f: f["range_s"]):
                 timing = ""
@@ -310,9 +317,9 @@ def render(data):
         closing = " ".join(output_text(facts[i]) for i in job["closing_fact_ids"])
         motion = " ".join(output_text(f) for f in selected if f["kind"] in {"action", "camera", "transition", "ending"})
         outputs.append({"id": job["id"], "mode": mode, "source_range_s": job["source_range_s"], "target_range_s": job["target_range_s"], "fact_ids": [f["id"] for f in selected], "first_frame_prompt": opening, "motion_prompt": motion, "end_frame_prompt": closing, "prompt": prompt})
-    result = {"jobs": outputs, "assembly": {"semantic_events": data.get("semantic_events", []), "visual_systems": data.get("visual_systems", [])}}
+    result = {"jobs": outputs, "assembly": {"semantic_events": data.get("semantic_events", []), "visual_systems": data.get("visual_systems", []), "replacement_map": data.get("replacement_map", []), "accepted_assets": data.get("accepted_assets", [])}}
     if data["audio_plan"]["method"] == "postproduction_copy":
-        result["audio_handoff"] = {"source_path": data["source"]["video_path"], "source_sha256": data["source"]["sha256"], "stream_index": data["audio_plan"]["stream_index"], "start_pts_s": data["audio_plan"]["start_pts_s"], "placement": "once_on_assembled_timeline", "remove_generated_audio": True, "maps": [{"source": j["source_range_s"], "target": j["target_range_s"]} for j in data["jobs"]], "lip_sync_verified": False}
+        result["audio_handoff"] = {"source_path": data["source"]["video_path"], "source_sha256": data["source"]["sha256"], "source_range_s": data["source"]["analysis_range_s"], "stream_index": data["audio_plan"]["stream_index"], "start_pts_s": data["audio_plan"]["start_pts_s"], "relative_start_s": data["audio_plan"]["start_pts_s"] - data["source"].get("time_origin_pts_s", 0), "placement": "once_on_assembled_timeline", "remove_generated_audio": True, "maps": [{"source": j["source_range_s"], "target": j["target_range_s"]} for j in data["jobs"]], "lip_sync_verified": False}
     return result
 
 
@@ -344,7 +351,11 @@ def validate_v2(data, base_dir, check_files=False, require_reviewed=False):
         if review.get("status") != "reviewed" or review.get("input_digest") != current or not text(review.get("notes")):
             errors.append("current semantic/media review required")
         required_ids = {i for f in data["facts"] if f["status"] == "observed" for i in f.get("evidence_ids", [])}
-        if not required_ids.issubset(set(review.get("evidence_ids", []))) or review.get("anchors_checked") is not True or review.get("tail_checked") is not True:
+        reviewed_ids = review.get("evidence_ids", [])
+        if not isinstance(reviewed_ids, list) or not all(isinstance(i, str) for i in reviewed_ids):
+            errors.append("review evidence_ids must be an array of IDs")
+            reviewed_ids = []
+        if not required_ids.issubset(set(reviewed_ids)) or review.get("anchors_checked") is not True or review.get("tail_checked") is not True:
             errors.append("review must cover used evidence, essential anchors and tail")
         if any(f.get("essential") and f["status"] == "uncertain" for f in data["facts"]):
             errors.append("unresolved essential fact: draft only")
@@ -352,7 +363,7 @@ def validate_v2(data, base_dir, check_files=False, require_reviewed=False):
         if any(f.get("essential") and f["id"] not in delivered for f in data["facts"]):
             errors.append("essential fact missing from delivery")
     if check_files:
-        assets = [dict(path=data["source"]["video_path"], sha256=data["source"]["sha256"])] + data["evidence"] + [r for j in data["jobs"] for r in j.get("references", [])]
+        assets = [dict(path=data["source"]["video_path"], sha256=data["source"]["sha256"])] + data["evidence"] + [r for j in data["jobs"] for r in j.get("references", [])] + data.get("accepted_assets", [])
         checked = set()
         for asset in assets:
             path = Path(asset["path"]).expanduser()
@@ -367,4 +378,19 @@ def validate_v2(data, base_dir, check_files=False, require_reviewed=False):
                     errors.append(f"asset hash mismatch: {asset['path']}")
             except OSError:
                 errors.append(f"asset missing: {asset['path']}")
+        if data["audio_plan"]["method"] == "postproduction_copy":
+            from media_tools import resolve_binary
+            probe = resolve_binary("ffprobe", "FFPROBE_BIN")
+            source_path = Path(data["source"]["video_path"])
+            if not source_path.is_absolute():
+                source_path = Path(base_dir) / source_path
+            try:
+                if not probe:
+                    raise ValueError("FFprobe required for audio handoff verification")
+                raw = subprocess.run([probe, "-v", "error", "-show_entries", "stream=index,codec_type,start_time", "-of", "json", str(source_path)], check=True, capture_output=True, text=True)
+                stream = next((s for s in json.loads(raw.stdout)["streams"] if s["index"] == data["audio_plan"]["stream_index"] and s["codec_type"] == "audio"), None)
+                if stream is None or abs(float(stream.get("start_time", 0)) - data["audio_plan"]["start_pts_s"]) > 0.001:
+                    errors.append("audio handoff does not match actual stream/start PTS")
+            except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+                errors.append("audio stream verification unavailable/failed")
     return errors

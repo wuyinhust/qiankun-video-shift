@@ -39,6 +39,8 @@ def main():
     scope = [manifest["analysis_window"]["start_s"], manifest["analysis_window"]["end_s"]]
     draft = {"schema_version": "2.0", "workflow": args.workflow, "intent": args.intent, "analysis_status": "partial", "source": {"video_path": source["video_path"], "sha256": source["sha256"], "duration_s": manifest.get("visual_end_s") or manifest["technical"]["duration_s"], "analysis_range_s": scope, "shot_manifest_path": str(args.manifest.resolve())}, "shots": shots, "evidence": evidence, "facts": [], "jobs": [], "audio_plan": {"method": "none", "content_status": "unavailable" if manifest["technical"]["audio_stream_count"] else "no_track"}, "review": {"status": "unreviewed"}}
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    draft["source"]["last_frame_time_s"] = max(e["range_s"][0] for e in evidence)
+    draft["source"]["time_origin_pts_s"] = manifest["time_origin_pts_s"]
     args.output.write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n")
     print(args.output.resolve())
 

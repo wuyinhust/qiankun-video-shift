@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from analysis_contract import compile_analysis, validate_v2, file_hash, digest
 from frame_evidence import nearest
+from inspect_analysis import context
 
 
 def fixture(root):
@@ -184,6 +185,63 @@ class ContractTests(unittest.TestCase):
         timeline = [{"decoder_index": i, "pts_s": t + 2, "time_s": t} for i, t in enumerate([0, 0.1, 0.3, 0.8])]
         self.assertEqual(0.3, nearest(timeline, 0.5, [0, 0.8])["time_s"])
         self.assertEqual(0.8, nearest(timeline, 0.8, [0.8, 1])["time_s"])
+
+    def test_last_actual_frame_can_be_far_from_end_at_low_fps(self):
+        d = copy.deepcopy(self.data)
+        d["source"]["last_frame_time_s"] = 3.5
+        d["facts"][-1]["range_s"] = [3.5, 3.5]
+        self.assertEqual([], validate_v2(compile_analysis(d), self.root))
+
+    def test_inspection_does_not_return_unrelated_job(self):
+        d = compile_analysis(self.data)
+        d["jobs"].append(dict(d["jobs"][0], id="unrelated"))
+        selected = context(d, job_id="J1")
+        self.assertEqual(["J1"], [j["id"] for j in selected["jobs"]])
+        self.assertEqual(["E1"], [e["id"] for e in selected["evidence"]])
+
+    def test_all_h3_routes_preserve_same_facts(self):
+        for mode in ["T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA"]:
+            with self.subTest(mode=mode):
+                d = copy.deepcopy(self.data)
+                d["capability"] = {"min_duration_s": 4, "max_duration_s": 15, "modes": [mode], "source": "Synthetic platform contract", "checked_at": "2026-10-03"}
+                job = d["jobs"][0]; job["mode"] = mode
+                times = {"T2VA": [], "I2VA": [0], "FL2VA": [0, 3.96], "L2VA": [3.96], "Ref2VA": [0]}[mode]
+                job["references"] = [{"label": f"<Picture {i + 1}>", "path": d["evidence"][0]["path"], "sha256": d["evidence"][0]["sha256"], "source_time_s": t, "retention": "reference", "description": "Use the reference for the target appearance."} for i, t in enumerate(times)]
+                output = compile_analysis(d)["derived"]["jobs"][0]
+                self.assertEqual(["F1", "F2", "F3"], output["fact_ids"])
+                self.assertEqual("A red cup sits on the table.", output["first_frame_prompt"])
+                self.assertEqual("The hand is still approaching when the clip ends.", output["end_frame_prompt"])
+
+    def test_copy_offsets_against_video_origin(self):
+        d = copy.deepcopy(self.data)
+        d["source"]["time_origin_pts_s"] = 2.0
+        d["audio_plan"] = {"method": "postproduction_copy", "content_status": "unavailable", "authorized_reuse": True, "stream_index": 1, "start_pts_s": 2.1}
+        self.assertAlmostEqual(0.1, compile_analysis(d)["derived"]["audio_handoff"]["relative_start_s"])
+
+    def test_fact_inspection_returns_only_requested_fact(self):
+        d = compile_analysis(self.data)
+        d["facts"][2]["after"] = ["F2"]
+        selected = context(d, fact_id="F2")
+        self.assertEqual(["F2"], [f["id"] for f in selected["facts"]])
+        self.assertEqual(["F3"], selected["dependent_fact_ids"])
+        self.assertEqual(["F1"], selected["affected_jobs"][0]["opening_fact_ids"])
+
+    def test_shot_inspection_avoids_whole_video_job(self):
+        d = compile_analysis(self.data)
+        d["shots"].append({"id": "S002", "range_s": [4, 8], "end_condition": "settled"})
+        d["facts"].append(dict(d["facts"][0], id="unrelated", shot_id="S002", range_s=[4, 4]))
+        selected = context(d, shot_id="S001")
+        self.assertEqual(["F1", "F2", "F3"], [f["id"] for f in selected["facts"]])
+        self.assertEqual(["S001"], [s["id"] for s in selected["shots"]])
+
+    def test_shot_inspection_includes_incoming_transition(self):
+        d = compile_analysis(self.data)
+        d["shots"].append({"id": "S002", "range_s": [4, 8], "end_condition": "settled"})
+        d["facts"].append(dict(d["facts"][0], id="F4", shot_id="S002", range_s=[4, 4]))
+        d["facts"].append(dict(d["facts"][0], id="cut", kind="transition", range_s=[3.96, 4]))
+        selected = context(d, shot_id="S002")
+        self.assertEqual(["F4"], [f["id"] for f in selected["facts"]])
+        self.assertEqual(["cut"], [f["id"] for f in selected["boundary_facts"]])
 
 
 if __name__ == "__main__":

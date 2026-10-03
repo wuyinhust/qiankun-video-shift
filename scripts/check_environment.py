@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import subprocess
 import sys
@@ -34,14 +33,12 @@ def build_report() -> dict:
     ffmpeg = resolve_binary("ffmpeg", "FFMPEG_BIN")
     ffprobe = resolve_binary("ffprobe", "FFPROBE_BIN")
     ytdlp = resolve_binary("yt-dlp", "YTDLP_BIN")
-    opencv = importlib.util.find_spec("cv2") is not None
     return {
         "python": sys.version.split()[0],
         "tools": {
             "ffmpeg": {"path": ffmpeg, "version": get_version(ffmpeg, "ffmpeg")},
             "ffprobe": {"path": ffprobe, "version": get_version(ffprobe, "ffprobe")},
             "yt-dlp": {"path": ytdlp, "version": get_version(ytdlp, "yt-dlp")},
-            "opencv": {"available": opencv},
         },
         "capabilities": {
             "local_source_manifest": True,
@@ -58,9 +55,6 @@ def build_report() -> dict:
 def print_human(report: dict) -> None:
     print(f"Python: {report['python']}")
     for name, info in report["tools"].items():
-        if name == "opencv":
-            print(f"OpenCV: {'available' if info['available'] else 'missing'}")
-            continue
         status = info["path"] or "missing"
         print(f"{name}: {status}")
     print(f"Core media pipeline: {'ready' if report['core_ready'] else 'not ready'}")
