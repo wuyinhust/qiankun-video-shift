@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import sys
+from analysis_contract import validate_v2
 
 
 MOMENT_TYPES = {
@@ -93,6 +94,8 @@ def validate(data: dict, check_files: bool, require_h3: bool) -> list[str]:
         if not isinstance(shot, dict):
             errors.append(f"{label} 必须是对象")
             continue
+        for key in ["observation", "shot_size", "camera_angle", "composition", "subject_motion", "camera_motion", "lighting_color", "visible_text", "audio", "transition"]:
+            check_complete_text(errors, f"{label}.{key}", shot.get(key))
         shot_id = shot.get("shot_id")
         if not isinstance(shot_id, str) or not shot_id:
             errors.append(f"{label}.shot_id 缺失")
@@ -112,6 +115,9 @@ def validate(data: dict, check_files: bool, require_h3: bool) -> list[str]:
             if previous_end >= 0 and float(start) < previous_end - 0.05:
                 errors.append(f"{label} 与上一镜头重叠")
             previous_start = float(start)
+            expected_start = 0.0 if previous_end < 0 else previous_end
+            if abs(float(start) - expected_start) > 0.05:
+                errors.append(f"{label} 时间覆盖有缺口")
             previous_end = max(previous_end, float(end))
             if duration is not None and float(end) > float(duration) + 0.05:
                 errors.append(f"{label}.end_s 超出源视频时长")
@@ -134,6 +140,8 @@ def validate(data: dict, check_files: bool, require_h3: bool) -> list[str]:
                         float(start) - 0.05 <= float(timestamp) <= float(end) + 0.05
                     ):
                         errors.append(f"{frame_label}.time_s 不在镜头范围内")
+    if duration is not None and abs(previous_end - float(duration)) > 0.05:
+        errors.append("shots 未覆盖片尾；局部分析请使用 v2 analysis_range_s")
 
     viral = data.get("viral_analysis") if isinstance(data.get("viral_analysis"), dict) else {}
     if viral.get("score_kind") not in {"structural_potential", "observed_performance"}:
@@ -287,6 +295,7 @@ def main() -> int:
     parser.add_argument("analysis", type=Path)
     parser.add_argument("--check-files", action="store_true")
     parser.add_argument("--require-h3", action="store_true")
+    parser.add_argument("--require-reviewed", action="store_true", help="require current v2 media/semantic review")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     try:
@@ -297,7 +306,14 @@ def main() -> int:
     if not isinstance(data, dict):
         print("错误：analysis 顶层必须是对象", file=sys.stderr)
         return 2
-    errors = validate(data, args.check_files, args.require_h3)
+    if data.get("schema_version") == "2.0":
+        errors = validate_v2(data, args.analysis.resolve().parent, args.check_files, args.require_reviewed)
+        if args.require_h3 and not any(j.get("mode") in H3_MODES for j in data.get("jobs", [])):
+            errors.append("要求 H3 输出，但 jobs 没有 H3 模式")
+    else:
+        errors = validate(data, args.check_files, args.require_h3)
+        if args.require_reviewed:
+            errors.append("v1 仅支持结构检查；严格复核需升级为 v2")
     if errors:
         for error in errors:
             print(f"- {error}", file=sys.stderr)

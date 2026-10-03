@@ -16,6 +16,7 @@ import subprocess
 import sys
 
 from media_tools import resolve_binary
+from frame_evidence import decode_timeline, nearest, extract_batch
 
 
 class SegmentError(RuntimeError):
@@ -92,7 +93,7 @@ def probe_video(ffprobe: str, video: Path) -> dict:
 
 
 def detect_scene_times(ffmpeg: str, video: Path, duration: float, threshold: float) -> list[float]:
-    expression = f"select='gt(scene,{threshold:.4f})',showinfo"
+    expression = f"setpts=PTS-STARTPTS,select='gt(scene,{threshold:.4f})',showinfo"
     result = run(
         [
             ffmpeg,
@@ -164,9 +165,9 @@ def frame_positions(
     duration = end - start
     inset = min(0.10, max(0.01, duration * 0.10))
     candidates: list[tuple[str, float]] = [
-        ("start", min(end, start + inset)),
+        ("start", start),
         ("middle", start + duration / 2.0),
-        ("end", max(start, end - inset)),
+        ("end", max(start, end - 0.000001)),
     ]
     if extra_interval > 0 and duration > extra_interval * 1.5:
         cursor = start + extra_interval
@@ -339,14 +340,15 @@ def main() -> int:
     parser.add_argument("video", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--scene-threshold", type=float, default=0.35)
-    parser.add_argument("--min-shot-seconds", type=float, default=0.50)
-    parser.add_argument("--max-seconds", type=float, default=120.0)
+    parser.add_argument("--min-shot-seconds", type=float, default=0.10)
+    parser.add_argument("--max-seconds", type=float, default=0.0)
     parser.add_argument("--max-shots", type=int, default=80)
     parser.add_argument("--max-frames-per-shot", type=int, default=9)
     parser.add_argument("--extra-frame-interval", type=float, default=0.0)
     parser.add_argument("--extract-clips", action="store_true")
     parser.add_argument("--no-audio", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--reuse", action="store_true", help="reuse only a matching source/settings and intact artifacts")
     args = parser.parse_args()
 
     try:
@@ -370,9 +372,22 @@ def main() -> int:
                 "缺少 ffmpeg 或 ffprobe；将其加入 PATH，或设置 FFMPEG_BIN/FFPROBE_BIN",
                 2,
             )
+        source_hash = sha256_file(video)
+        settings = {k: getattr(args, k) for k in ["scene_threshold", "min_shot_seconds", "max_seconds", "max_shots", "max_frames_per_shot", "extra_frame_interval", "extract_clips", "no_audio"]}
+        cached_path = args.output_dir / "shot_manifest.json"
+        if args.reuse and cached_path.is_file() and not args.force:
+            cached = json.loads(cached_path.read_text())
+            if cached.get("pipeline_version") != "2.0" or cached.get("source", {}).get("sha256") != source_hash or cached.get("settings") != settings:
+                raise SegmentError("缓存源文件或设置已改变；使用新目录或 --force", 4)
+            artifacts = cached.get("artifacts", [])
+            if not artifacts or any(not Path(a["path"]).is_file() or sha256_file(Path(a["path"])) != a["sha256"] for a in artifacts):
+                raise SegmentError("缓存产物缺失或哈希改变；使用新目录或 --force", 4)
+            print(str(cached_path.resolve()))
+            return 0
         frames_dir, clips_dir = prepare_output(args.output_dir, args.force)
         technical = probe_video(ffprobe, video)
-        full_duration = technical["duration_s"]
+        timeline, visual_end = decode_timeline(ffprobe, video)
+        full_duration = visual_end if visual_end is not None else technical["duration_s"]
         if full_duration <= 0:
             raise SegmentError("视频时长必须大于 0", 2)
         analysis_duration = full_duration
@@ -390,25 +405,22 @@ def main() -> int:
             clips_dir.mkdir(parents=True, exist_ok=True)
 
         warnings: list[str] = []
+        if visual_end is None:
+            warnings.append("最后一帧持续时间未知；analysis end 来自容器，不代表精确视觉终点")
+        plans = []
+        for start, end in shots_raw:
+            plans.append([(role, requested, nearest(timeline, requested, [start, end])) for role, requested in frame_positions(start, end, args.extra_frame_interval, args.max_frames_per_shot)])
+        extracted = extract_batch(ffmpeg, video, [row for plan in plans for _, _, row in plan], frames_dir)
         shots: list[dict] = []
         for index, (start, end) in enumerate(shots_raw, start=1):
             shot_id = f"S{index:03d}"
             keyframes = []
-            positions = frame_positions(
-                start,
-                end,
-                args.extra_frame_interval,
-                args.max_frames_per_shot,
-            )
-            for frame_index, (role, timestamp) in enumerate(positions, start=1):
-                millis = int(round(timestamp * 1000))
-                destination = frames_dir / f"{shot_id}_{frame_index:02d}_{role}_{millis:09d}ms.jpg"
-                extract_frame(ffmpeg, video, timestamp, destination, args.force)
-                keyframes.append({
-                    "role": role,
-                    "time_s": timestamp,
-                    "path": str(destination.resolve()),
-                })
+            seen = set()
+            for role, requested, row in plans[index - 1]:
+                if row["decoder_index"] in seen:
+                    continue
+                seen.add(row["decoder_index"])
+                keyframes.append({**extracted[row["decoder_index"]], "role": role, "requested_time_s": requested})
             clip_path = None
             if args.extract_clips:
                 destination = clips_dir / f"{shot_id}_{int(start * 1000):09d}-{int(end * 1000):09d}ms.mp4"
@@ -433,11 +445,22 @@ def main() -> int:
             audio_path = str(destination.resolve())
 
         index_path = write_frame_index(args.output_dir, shots)
+        if sha256_file(video) != source_hash:
+            raise SegmentError("抽帧期间源文件改变；弃用本次证据", 2)
+        audio_streams = json.loads(run([ffprobe, "-v", "error", "-show_streams", "-of", "json", str(video)], "音轨探测").stdout).get("streams", [])
+        artifacts = [{"path": str(p.resolve()), "sha256": sha256_file(p)} for p in [index_path] + sorted(frames_dir.glob("*.jpg")) + sorted(clips_dir.glob("*.mp4")) + ([Path(audio_path)] if audio_path else [])]
         manifest = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
+            "pipeline_version": "2.0",
+            "settings": settings,
+            "artifacts": artifacts,
+            "time_origin_pts_s": timeline[0]["pts_s"],
+            "last_frame_time_s": timeline[-1]["time_s"],
+            "visual_end_s": visual_end,
+            "audio_streams": [{"index": x["index"], "start_pts_s": float(x.get("start_time", 0)), "duration_s": float(x["duration"]) if x.get("duration") else None} for x in audio_streams if x.get("codec_type") == "audio"],
             "source": {
                 "video_path": str(video),
-                "sha256": sha256_file(video),
+                "sha256": source_hash,
                 "size_bytes": video.stat().st_size,
             },
             "technical": technical,

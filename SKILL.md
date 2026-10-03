@@ -145,3 +145,11 @@ python3 scripts/validate_analysis.py "<analysis.json>" --check-files
 ## 参考来源
 
 融合方法与上游边界见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## v2 融合能力
+
+本次升级新增事实绑定生产包；新任务使用 [references/evidence-v2.md](references/evidence-v2.md)。原v1契约只保留兼容检查。
+
+第二式增加疑点驱动原尺寸返图、接触与遮挡状态链、实际PTS和尾段反查。运行 `scripts/review_evidence.py` 对疑点区间生成原图索引；产物不自动获得已查看状态。`segment_video.py --reuse` 只复用源哈希、设置和产物哈希全部匹配的结果。
+
+第四式从同一事实表编译逐镜首帧、Motion、H3和声音交接。完整迁移补 [references/production-plan.md](references/production-plan.md) 的跨镜视听系统、语义事件、完整替换与素材复用。修改任务先用 `scripts/inspect_analysis.py` 只读取受影响job或system。
